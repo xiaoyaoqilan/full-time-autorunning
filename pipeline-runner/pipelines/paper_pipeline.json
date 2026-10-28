@@ -1,0 +1,33 @@
+{
+  "name": "paper-pipeline",
+  "default_retries": 2,
+  "max_workers": 4,
+  "stages": [
+    { "id": "gate", "role": "gate", "title": "输入门禁→任务书", "command": null,
+      "artifacts": ["docs/01-任务书.md"], "depends_on": [] },
+    { "id": "reader", "role": "reader", "title": "全自动读论文（精读/知识卡片/翻译/人话）", "command": null,
+      "artifacts": ["docs/02-精读笔记.md", "docs/03-全文翻译.md", "docs/04-人话总结.md"],
+      "depends_on": ["gate"] },
+    { "id": "scout", "role": "scout", "title": "多源文献侦察（lit_search.py + WebSearch）", "command": null,
+      "artifacts": ["docs/05-文献侦察.md"], "depends_on": ["gate"] },
+    { "id": "novelty", "role": "novelty", "title": "创新点审查（claim 逐条判撞车）", "command": null,
+      "artifacts": ["docs/06-创新点审查.md"], "depends_on": ["reader", "scout"],
+      "human_approval": true },
+    { "id": "second", "role": "second", "title": "独立复核（❌ 案件可选）", "command": null, "optional": true,
+      "artifacts": ["docs/06a-复核记录.md"], "depends_on": ["novelty"] },
+    { "id": "review-ai", "role": "review-ai", "title": "LLM 自动审稿（模式 C 可选）", "command": null, "optional": true,
+      "artifacts": ["docs/07-审稿意见.md"], "depends_on": ["novelty"] },
+    { "id": "method", "role": "method", "title": "方法审查（可选）", "command": null, "optional": true,
+      "artifacts": ["docs/07b-方法审查.md"], "depends_on": ["reader"] },
+    { "id": "writer", "role": "writer", "title": "科研报告（含 PROCEED/REFINE/PIVOT）", "command": null,
+      "artifacts": ["docs/08-科研报告.md"], "depends_on": ["novelty"] },
+    { "id": "qa", "role": "qa", "title": "完整性门（4 层引用验证 + 七模式清单）", "command": null,
+      "artifacts": ["docs/09-核查报告.md"], "depends_on": ["writer"],
+      "human_approval": true },
+    { "id": "media", "role": "media", "title": "对外解读文（可选，需人工终审）", "command": null, "optional": true,
+      "artifacts": ["docs/10-媒体文案.md"], "depends_on": ["qa"],
+      "human_approval": true },
+    { "id": "archivist", "role": "archivist", "title": "摘要索引 + 知识库归档", "command": null,
+      "artifacts": ["docs/00-摘要索引.md"], "depends_on": ["qa"] }
+  ]
+}

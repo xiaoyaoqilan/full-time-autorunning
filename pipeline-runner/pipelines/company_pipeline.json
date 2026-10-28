@@ -1,0 +1,29 @@
+{
+  "name": "company-pipeline",
+  "default_retries": 2,
+  "max_workers": 4,
+  "stages": [
+    { "id": "pm", "role": "pm", "title": "PRD", "command": null,
+      "artifacts": ["docs/01-PRD.md"], "depends_on": [] },
+    { "id": "cto", "role": "cto", "title": "架构评审（架构门禁）", "command": null,
+      "artifacts": ["docs/02-架构评审.md"], "depends_on": ["pm"],
+      "human_approval": true },
+    { "id": "splitter", "role": "splitter", "title": "任务拆分", "command": null,
+      "artifacts": ["docs/03-任务拆分.md"], "depends_on": ["cto"] },
+    { "id": "algo", "role": "algo", "title": "算法设计", "command": null, "optional": true,
+      "artifacts": ["docs/04-算法设计.md"], "depends_on": ["splitter"] },
+    { "id": "dev", "role": "dev", "title": "源码实现", "command": null,
+      "artifacts": ["src/"], "depends_on": ["splitter"] },
+    { "id": "reviewer", "role": "reviewer", "title": "Code Review（代码门禁）", "command": null,
+      "artifacts": ["docs/05-CodeReview.md"], "depends_on": ["dev"],
+      "human_approval": true },
+    { "id": "qa", "role": "qa", "title": "验收（验收门禁）", "command": null,
+      "artifacts": ["docs/06-验收报告.md"], "depends_on": ["reviewer", "algo"],
+      "human_approval": true },
+    { "id": "media", "role": "media", "title": "对外文案（可选，需人工终审）", "command": null, "optional": true,
+      "artifacts": ["docs/07-媒体文案.md"], "depends_on": ["qa"],
+      "human_approval": true },
+    { "id": "archivist", "role": "archivist", "title": "摘要索引归档", "command": null,
+      "artifacts": ["docs/00-摘要索引.md"], "depends_on": ["qa"] }
+  ]
+}

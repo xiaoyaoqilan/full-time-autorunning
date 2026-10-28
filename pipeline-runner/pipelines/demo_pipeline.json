@@ -1,0 +1,16 @@
+{
+  "name": "demo",
+  "default_retries": 1,
+  "max_workers": 4,
+  "stages": [
+    { "id": "a", "title": "阶段A（shell）", "command": "python -c \"open('out_a.txt','w').write('A done')\"", "artifacts": ["out_a.txt"] },
+    { "id": "b", "title": "阶段B（shell，与A并行）", "command": "python -c \"open('out_b.txt','w').write('B done')\"", "artifacts": ["out_b.txt"] },
+    { "id": "c", "title": "阶段C（依赖A+B，首次故意失败演示自动重试）",
+      "command": "python -c \"import os,sys; (open('.c_marker','w').write('x'), sys.exit(3)) if not os.path.exists('.c_marker') else open('out_c.txt','w').write('C done')\"",
+      "artifacts": ["out_c.txt"], "depends_on": ["a", "b"] },
+    { "id": "d", "title": "阶段D（人工角色，门禁：模拟外部发布）", "command": null,
+      "artifacts": ["out_d.txt"], "depends_on": ["c"], "human_approval": true },
+    { "id": "e", "title": "阶段E（收尾，依赖D放行）", "command": "python -c \"open('out_e.txt','w').write('E done')\"",
+      "artifacts": ["out_e.txt"], "depends_on": ["d"] }
+  ]
+}
