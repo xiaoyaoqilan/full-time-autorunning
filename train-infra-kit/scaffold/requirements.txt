@@ -1,0 +1,9 @@
+# Whisper + LoRA 训练脚手架依赖（全部下界，不锁死版本，便于跟随上游修复）
+torch>=2.1
+transformers>=4.37
+peft>=0.7
+datasets>=2.16
+accelerate>=0.25
+pyyaml>=6.0
+soundfile>=0.12
+numpy>=1.24

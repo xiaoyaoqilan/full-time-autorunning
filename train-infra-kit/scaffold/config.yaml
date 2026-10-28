@@ -1,0 +1,59 @@
+# Whisper + LoRA 训练配置（唯一真值；命令行只做覆盖，不重复定义）
+# 约定：两空格缩进、不用锚点/别名/多行标量/flow mapping（PyYAML 子集，见 02·R6）
+# 每个字段均为必填，未知键会在启动时报错（防 learnig_rate 这类拼写错误静默生效）
+
+model:
+  name_or_path: openai/whisper-small        # HF id 或本地目录；<替换为你的模型>
+  language: zh                              # 语言码；null = 多语种自动检测
+  task: transcribe                          # transcribe | translate
+  freeze_encoder: false                     # true 可省约 1/3 激活；LoRA 场景常为 false
+
+data:
+  train_manifest: data/train.jsonl          # 每行 {"audio": "path.wav", "text": "转写文本"}
+  eval_manifest: null                       # null = 不评测；给路径则每 epoch 末尾跑一次
+  audio_column: audio                       # 与 manifest 的键名一致
+  text_column: text                         # 与 manifest 的键名一致
+  sample_rate: 16000                        # Whisper 固定 16k，不一致会重采样（有精度损失）
+  max_audio_seconds: 30.0                   # >30 秒截断（Whisper 位置编码上限），范围 (0, 30]
+  num_workers: 4                            # DataLoader 进程数，范围 0..16
+
+lora:
+  r: 8                                      # 秩，范围 1..64；0 = 不挂 LoRA（全量微调）
+  alpha: 16                                 # 缩放系数，惯例 2r；lora_alpha/r 决定实际强度
+  dropout: 0.05                             # 范围 0..0.3；数据量小时可上调到 0.1 抑制过拟合
+  # 注意力投影层参数集中、跨层共享表征弱，LoRA 收益最高；
+  # 只挂 self-attn 约 0.48% 可训练参数，连 cross-attn 全挂约 0.73%
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - out_proj
+  bias: none                                # none | all | lora_only
+
+train:
+  output_dir: out/whisper-lora              # 存档与日志落点；不存在会自动创建
+  per_device_batch_size: 8                  # ≥1；显存不足先降这个
+  gradient_accumulation_steps: 4            # ≥1；等效 batch = 上者 × 本值 × GPU 数
+  learning_rate: 0.001                      # LoRA 常用 1e-4~3e-3；全量微调请降到 1e-5 量级
+  weight_decay: 0.01                        # ≥0
+  warmup_ratio: 0.05                        # 范围 0..0.2
+  num_epochs: 3                             # 允许小数（按 step 折算）
+  max_steps: -1                             # >0 时覆盖 num_epochs
+  precision: bf16                           # bf16 | fp16 | no（fp16 需 GradScaler）
+  gradient_checkpointing: true              # 省显存约 30~50%，慢约 20%
+  max_grad_norm: 1.0                        # 0 = 不裁剪
+  seed: 42                                  # 影响 python/numpy/torch/cuda 四路随机源
+  save_steps: 500                           # 每 N 步落 checkpoint-<step>.pt
+  save_total_limit: 3                       # 只保留最近 N 个档，0 = 不清理
+
+logging:
+  log_file: train.log                       # 同时写 stdout 与该文件（Tee）
+  log_steps: 20                             # 每 N 步打印 lr/loss/grad_norm/峰值显存
+  wandb:
+    enabled: false                          # 默认关闭，避免离线环境卡住
+    project: whisper-lora
+    run_name: null                          # null = 用时间戳命名
+
+resume:
+  mode: none                                # none | auto | path
+  path: null                                # mode=path 时必填，形如 out/whisper-lora/checkpoint-500.pt

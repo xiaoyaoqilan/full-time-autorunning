@@ -1,0 +1,16 @@
+# WorkBuddy 内部数据（含个人记忆 / 会话配置，禁止入库）
+.workbuddy/
+
+# 第三方克隆仓库（自带 .git、体积巨大，不入库）
+prompt-optimizer/
+
+# Python 缓存 / 临时产物
+__pycache__/
+*.pyc
+*.pyo
+out/
+
+# OS / 编辑器
+.DS_Store
+Thumbs.db
+*.egg-info/
