@@ -1,0 +1,13 @@
+{
+  "name": "stall-demo",
+  "default_retries": 0,
+  "max_workers": 2,
+  "notify_cmd": "python -c \"open('notify.log','a').write('{stage} {status} {reason}\\n')\"",
+  "stages": [
+    { "id": "s", "title": "模拟僵死阶段（睡60秒）",
+      "command": "python -c \"import time; time.sleep(60); open('out_s.txt','w').write('x')\"",
+      "artifacts": ["out_s.txt"] },
+    { "id": "t", "title": "收尾", "command": "python -c \"open('out_t.txt','w').write('x')\"",
+      "artifacts": ["out_t.txt"], "depends_on": ["s"] }
+  ]
+}

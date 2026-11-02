@@ -61,19 +61,20 @@ class Orchestrator:
         self.state_dir = Path(state_dir) if state_dir else self.project / ".pipeline"
         self.log_dir = self.state_dir / "logs"
         self.log_dir.mkdir(parents=True, exist_ok=True)
+        self.heart_dir = self.state_dir / "heartbeat"   # v1.1: 每个执行中阶段的心跳文件
+        self.heart_dir.mkdir(parents=True, exist_ok=True)
         self.state_path = self.state_dir / "state.json"
         self.lock = threading.Lock()
         self.halted = False
+        self._hb_events: dict[str, threading.Event] = {}
         self._load()
 
     # ---------- 状态读写 ----------
     def _load(self):
         if self.state_path.exists():
             self.state = json.loads(self.state_path.read_text(encoding="utf-8"))
-            for sid, st in self.state["stages"].items():
-                if st["status"] == RUNNING:  # 上次中断残留
-                    st["status"] = PENDING
-                    st.setdefault("history", []).append(f"{now()} 检测到中断残留，重置为 pending")
+            # running 残留不在 _load 处理：留给 _recover_stale（watch/run 各自按阈值判定），
+            # 避免并发 status/watch 把活跃执行的 running 误重置
         else:
             self.state = {
                 "pipeline": self.defn["name"],
@@ -138,6 +139,28 @@ class Orchestrator:
         return missing
 
     # ---------- 执行 ----------
+    def _heartbeat(self, sid: str, stop: threading.Event):
+        """执行期心跳：先立即写一次，之后每 5s 刷新 heartbeat/<sid>，供 watchdog（可跨进程）判断活性。"""
+        p = self.heart_dir / sid
+        while True:
+            try:
+                p.write_text(now(), encoding="utf-8")
+            except OSError:
+                pass
+            if stop.wait(5):
+                break
+
+    def _notify(self, sid: str, status: str, reason: str = ""):
+        """v1.1 通知钩子：定义里配 notify_cmd 模板（可用 {stage}/{status}/{reason}）则执行。"""
+        cmd = self.defn.get("notify_cmd")
+        if not cmd:
+            return
+        try:
+            subprocess.run(cmd.format(stage=sid, status=status, reason=reason),
+                           shell=True, capture_output=True, text=True, timeout=30)
+        except Exception as e:  # noqa: BLE001 通知失败不影响主流程
+            print(f"[notify-error] {sid}: {e}")
+
     def _exec(self, sid: str):
         s, st = self.stages[sid], self.state["stages"][sid]
         attempt = st["attempts"] + 1
@@ -147,43 +170,55 @@ class Orchestrator:
         if not s["command"]:  # 人工/AI 阶段：由外部 done 标记，不会被调度到
             return
 
+        stop_ev = threading.Event()
+        self._hb_events[sid] = stop_ev
+        threading.Thread(target=self._heartbeat, args=(sid, stop_ev), daemon=True).start()
         try:
-            proc = subprocess.run(
-                s["command"], shell=True, cwd=str(self.project),
-                capture_output=True, text=True, timeout=s.get("timeout", 600),
-            )
-            log_path.write_text(
-                f"$ {s['command']}\n\n--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}\nexit={proc.returncode}",
-                encoding="utf-8",
-            )
-        except Exception as e:  # noqa: BLE001
-            log_path.write_text(f"$ {s['command']}\n\n[exception] {e}", encoding="utf-8")
-            proc = None
+            try:
+                proc = subprocess.run(
+                    s["command"], shell=True, cwd=str(self.project),
+                    capture_output=True, text=True, timeout=s.get("timeout", 600),
+                )
+                log_path.write_text(
+                    f"$ {s['command']}\n\n--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}\nexit={proc.returncode}",
+                    encoding="utf-8",
+                )
+            except Exception as e:  # noqa: BLE001
+                log_path.write_text(f"$ {s['command']}\n\n[exception] {e}", encoding="utf-8")
+                proc = None
 
-        if proc is None or proc.returncode != 0:
-            self._on_failure(sid, attempt, f"命令退出码非 0（日志 {log_path.name}）")
-            return
-        missing = self._check_artifacts(sid)
-        if missing:
-            self._on_failure(sid, attempt, f"命令成功但产物缺失: {missing}")
-            return
-        self._set(sid, AWAIT if s["human_approval"] else DONE,
-                  f"成功（第 {attempt} 次）", finished=now(), last_log=str(log_path))
-        if s["human_approval"]:
-            print(f"[gate] 阶段 {sid} 完成，等待放行：approve {sid}")
+            if proc is None or proc.returncode != 0:
+                self._on_failure(sid, attempt, f"命令退出码非 0（日志 {log_path.name}）")
+                return
+            missing = self._check_artifacts(sid)
+            if missing:
+                self._on_failure(sid, attempt, f"命令成功但产物缺失: {missing}")
+                return
+            self._set(sid, AWAIT if s["human_approval"] else DONE,
+                      f"成功（第 {attempt} 次）", finished=now(), last_log=str(log_path))
+            self._notify(sid, "done" if not s["human_approval"] else "awaiting_approval")
+            if s["human_approval"]:
+                print(f"[gate] 阶段 {sid} 完成，等待放行：approve {sid}")
+        finally:
+            stop_ev.set()
+            self._hb_events.pop(sid, None)
+            (self.heart_dir / sid).unlink(missing_ok=True)
 
     def _on_failure(self, sid: str, attempt: int, reason: str):
         s = self.stages[sid]
         if attempt <= s["retries"]:
             self._set(sid, PENDING, f"失败自动重试（{reason}）", last_fail=reason)
+            self._notify(sid, "retry", reason)
             print(f"[retry] {sid} 第 {attempt} 次失败：{reason}，自动重试")
         else:
             self._set(sid, FAILED, reason, last_fail=reason, finished=now())
+            self._notify(sid, "failed", reason)
             print(f"[halt] {sid} 重试 {s['retries']} 次后仍失败：{reason}，主管修复后 retry {sid}")
             self.halted = True
 
     def run(self, only: list[str] | None = None):
         print(f"=== {self.defn['name']} 开始编排（断点续跑）===")
+        self._recover_stale(stall_sec=15)  # 重启续跑：心跳死超 15s 的 running 阶段先恢复
         while not self.halted:
             ready = self._ready()
             if only:
@@ -201,6 +236,39 @@ class Orchestrator:
                    if self.state["stages"][sid]["status"] == PENDING and s["command"] is None and self._deps_satisfied(sid)]
         if waiting:
             print(f"[manual] 等人工/AI 执行后标记: {' '.join(f'done {sid}' for sid in waiting)}")
+
+    # ---------- Watchdog（v1.1，吸收 DeepSeek Super-agent 第 5 点） ----------
+    def _hb_age(self, sid: str) -> float:
+        hp = self.heart_dir / sid
+        return time.time() - hp.stat().st_mtime if hp.exists() else 1e9
+
+    def _recover_stale(self, stall_sec: float):
+        """发现 running 且心跳超时的阶段 → 按修复策略介入：额度内重新入队，用完转 FAILED。"""
+        for sid in list(self.state["stages"]):
+            if self.state["stages"][sid]["status"] != RUNNING:
+                continue
+            age = self._hb_age(sid)
+            if age <= stall_sec:
+                continue
+            s = self.stages[sid]
+            attempt = self.state["stages"][sid]["attempts"]
+            reason = f"watchdog: 心跳超时 {age:.0f}s（阈值 {stall_sec:.0f}s），判定执行进程已死"
+            if attempt <= s["retries"]:
+                self._set(sid, PENDING, reason + " → 自动重新入队", last_fail=reason)
+                self._notify(sid, "watchdog_requeue", reason)
+                print(f"[watchdog] {sid} {reason} → 重新入队")
+            else:
+                self._set(sid, FAILED, reason + " → 等主管修复", last_fail=reason, finished=now())
+                self._notify(sid, "watchdog_failed", reason)
+                print(f"[watchdog] {sid} {reason} → FAILED（重试额度已用完，retry 恢复）")
+
+    def watch(self, stall_sec: float, loop: bool = False, interval: float = 30.0):
+        """盯 running 阶段心跳，可由另一个进程/定时任务运行（与本编排器进程解耦）。"""
+        while True:
+            self._recover_stale(stall_sec)
+            if not loop:
+                break
+            time.sleep(interval)
 
     # ---------- 人工操作命令 ----------
     def done(self, sid: str, evidence: str = ""):
@@ -281,6 +349,10 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("run"); r.add_argument("stages", nargs="*")
     sub.add_parser("status")
+    w = sub.add_parser("watch"); w.add_argument("--stall-sec", type=float, default=600,
+        help="心跳超时阈值秒数（默认 600）"); w.add_argument("--loop", action="store_true",
+        help="常驻循环（默认单次巡检后退出）"); w.add_argument("--interval", type=float, default=30.0,
+        help="循环巡检间隔秒数（默认 30）")
     d = sub.add_parser("done"); d.add_argument("stage"); d.add_argument("--evidence", default="")
     f = sub.add_parser("fail"); f.add_argument("stage"); f.add_argument("--reason", default="人工标记失败")
     a = sub.add_parser("approve"); a.add_argument("stage")
@@ -294,6 +366,8 @@ def main():
         orch.run(args.stages or None)
     elif args.cmd == "status":
         orch.status()
+    elif args.cmd == "watch":
+        orch.watch(args.stall_sec, loop=args.loop, interval=args.interval)
     elif args.cmd == "done":
         orch.done(args.stage, args.evidence)
     elif args.cmd == "fail":
